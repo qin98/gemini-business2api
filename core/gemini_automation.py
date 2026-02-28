@@ -333,16 +333,15 @@ class GeminiAutomation:
         from datetime import datetime
         task_start_time = datetime.now()
 
-        # Step 1: 导航到首页，提取动态 XSRF Token
+        # Step 1: 导航到登录页面
         self._log("info", f"🌐 打开登录页面: {email}")
-
         page.get(AUTH_HOME_URL, timeout=self.timeout)
         time.sleep(random.uniform(2, 4))
 
         # 从页面动态提取 XSRF token（避免硬编码被 Google 标黑）
         xsrf_token = self._extract_xsrf_token(page)
 
-        # 设置 XSRF Cookie（不再设置假的 reCAPTCHA cookie，让浏览器自己处理）
+        # 设置 XSRF Cookie
         try:
             self._log("info", "🍪 设置 XSRF Cookie...")
             page.set.cookies({
@@ -355,8 +354,35 @@ class GeminiAutomation:
         except Exception as e:
             self._log("warning", f"⚠️ Cookie 设置失败: {e}")
 
-        login_hint = quote(email, safe="")
-        login_url = f"https://auth.business.gemini.google/login/email?continueUrl=https%3A%2F%2Fbusiness.gemini.google%2F&loginHint={login_hint}&xsrfToken={xsrf_token}"
+        # Step 1.5: 在登录页面通过表单填写邮箱（Google 不再接受 URL 直跳方式）
+        email_filled = False
+        email_selectors = [
+            "css:input[type='email']",
+            "css:input[name='email']",
+            "css:input[name='identifier']",
+            "css:input[id='identifierId']",
+            "css:input[autocomplete='email']",
+            "css:input[autocomplete='username']",
+        ]
+        for selector in email_selectors:
+            try:
+                email_input = page.ele(selector, timeout=3)
+                if email_input:
+                    self._log("info", "📧 找到邮箱输入框，填写邮箱...")
+                    self._simulate_human_input(email_input, email)
+                    time.sleep(random.uniform(0.5, 1))
+                    email_filled = True
+                    break
+            except Exception:
+                continue
+
+        if not email_filled:
+            # 回退：尝试 URL 方式（兼容旧版页面结构）
+            self._log("warning", "⚠️ 未找到邮箱输入框，尝试 URL 方式")
+            login_hint = quote(email, safe="")
+            login_url = f"https://auth.business.gemini.google/login/email?continueUrl=https%3A%2F%2Fbusiness.gemini.google%2F&loginHint={login_hint}&xsrfToken={xsrf_token}"
+            page.get(login_url, timeout=self.timeout)
+            time.sleep(random.uniform(3, 5))
 
         # 启动网络监听（只监听 batchexecute，减少干扰）
         try:
@@ -369,15 +395,19 @@ class GeminiAutomation:
         except Exception:
             pass
 
-        page.get(login_url, timeout=self.timeout)
-        time.sleep(random.uniform(3, 5))
-
         # 模拟真实用户行为：页面加载后随机滚动
         self._random_scroll(page)
 
         # Step 2: 检查当前页面状态
         current_url = page.url
         self._log("info", f"📍 当前 URL: {current_url}")
+
+        # 检测 signin-error 页面（token 失效或被拒绝）
+        if "signin-error" in current_url:
+            self._log("error", "❌ 进入 signin-error 页面，可能是 token 失效或被风控拦截")
+            self._save_screenshot(page, "signin_error")
+            return {"success": False, "error": "signin-error: token rejected by Google, try changing proxy"}
+
         has_business_params = "business.gemini.google" in current_url and "csesidx=" in current_url and "/cid/" in current_url
 
         if has_business_params:
@@ -571,6 +601,12 @@ class GeminiAutomation:
                     return False
         except Exception as e:
             self._log("warning", f"⚠️ 搜索按钮异常: {e}")
+
+        # 检查是否在 signin-error 页面（不应该继续尝试发送）
+        if "signin-error" in (page.url or ""):
+            self._stop_listen(page)
+            self._log("error", "❌ 在 signin-error 页面，无法发送验证码")
+            return False
 
         # 检查是否已经在验证码输入页面
         code_input = page.ele("css:input[jsname='ovqh0b']", timeout=2) or page.ele("css:input[name='pinInput']", timeout=1)
